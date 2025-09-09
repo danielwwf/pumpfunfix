@@ -1,0 +1,217 @@
+// ==UserScript==
+// @name         Pump.fun Auto Floater (Anti-Flicker)
+// @namespace    lolnuked.tools
+// @match        https://pump.fun/coin/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+(function () {
+  // If flicker persists, set to true to mirror instead of moving the element
+  const USE_MIRROR = false; // <- try true if needed
+
+  const KEY = 'pf_layout_' + location.pathname;
+
+  const css = document.createElement('style');
+  css.textContent = `
+  .pf-float{position:fixed;z-index:2147483646;inset:auto 16px 16px auto;width:560px;height:315px;background:#000;
+    border-radius:12px;overflow:hidden;box-shadow:0 12px 30px rgba(0,0,0,.55);border:1px solid #ffffff22;
+    contain: paint; will-change: transform; backface-visibility: hidden;}
+  .pf-float .pf-bar{height:28px;background:#0b0b0bcc;color:#fff;font:12px system-ui;display:flex;
+    align-items:center;justify-content:space-between;padding:0 8px;cursor:move;backdrop-filter:blur(10px)}
+  .pf-float .pf-btn{all:unset;cursor:pointer;padding:0 6px}
+  .pf-float .pf-resize{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;
+    background:linear-gradient(135deg,transparent 50%,#aaa 50%)}
+  /* kill animations/transitions that cause hover-jitter */
+  .pf-float *, .pf-float, video, iframe { transition:none !important; animation:none !important; }
+  /* force the media to fill the window without changing its own intrinsic size */
+  .pf-fill{width:100% !important; height:100% !important; max-width:none !important; max-height:none !important; object-fit:contain;}
+  .pf-toolbar{position:fixed;top:12px;right:12px;z-index:2147483647;background:#0b0b0bcc;color:#fff;
+    font:12px system-ui;padding:8px;border-radius:10px;display:flex;gap:6px}
+  .pf-toolbar button{border:1px solid #ffffff33;background:#1a1a1a;color:#fff;padding:6px 8px;border-radius:8px;cursor:pointer}
+  `;
+  document.head.appendChild(css);
+
+  function pickVideoish() {
+    const cands = [...document.querySelectorAll(
+      'video, iframe[src*="twitch"], iframe[src*="youtube"], [class*="video"], [class*="player"]'
+    )].filter(el => {
+      const r = el.getBoundingClientRect();
+      return r.width * r.height > 4000 && getComputedStyle(el).display !== 'none';
+    }).sort((a, b) => {
+      const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      return (rb.width * rb.height) - (ra.width * ra.height);
+    });
+    return cands[0] || null;
+  }
+
+  function makePlaceholder(forEl){
+    const r = forEl.getBoundingClientRect();
+    const ph = document.createElement('div');
+    ph.className = 'pf-placeholder';
+    ph.style.width  = r.width  + 'px';
+    ph.style.height = r.height + 'px';
+    ph.style.minWidth  = r.width  + 'px';
+    ph.style.minHeight = r.height + 'px';
+    ph.style.display = 'block';
+    return ph;
+  }
+
+  function saveLayout(wrap) {
+    const r = wrap.getBoundingClientRect();
+    localStorage.setItem(KEY, JSON.stringify({
+      left: wrap.style.left || '',
+      top: wrap.style.top || '',
+      right: wrap.style.right || '',
+      bottom: wrap.style.bottom || '',
+      width: r.width, height: r.height
+    }));
+  }
+  function loadLayout(wrap) {
+    try {
+      const s = JSON.parse(localStorage.getItem(KEY) || '{}');
+      if (s.left || s.right) { wrap.style.left = s.left; wrap.style.right = s.right; }
+      if (s.top || s.bottom) { wrap.style.top = s.top; wrap.style.bottom = s.bottom; }
+      if (s.width && s.height) { wrap.style.width = s.width + 'px'; wrap.style.height = s.height + 'px'; }
+    } catch {}
+  }
+
+  function makeFloatMove(el){
+    const ph = makePlaceholder(el);
+    el.parentNode.insertBefore(ph, el);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'pf-float';
+    const bar = document.createElement('div');
+    bar.className = 'pf-bar';
+    bar.innerHTML = `<span>Floating player</span>
+      <span>
+        <button class="pf-btn pf-left"  title="Snap left">⇤</button>
+        <button class="pf-btn pf-right" title="Snap right">⇥</button>
+        <button class="pf-btn pf-close" title="Close">×</button>
+      </span>`;
+    const resize = document.createElement('div'); resize.className = 'pf-resize';
+
+    // Freeze the media element’s own geometry to avoid hover-resize effects
+    el.classList.add('pf-fill');
+    el.style.transform = 'translateZ(0)';
+
+    // Float
+    document.body.appendChild(wrap);
+    wrap.appendChild(bar);
+    wrap.appendChild(el);
+    wrap.appendChild(resize);
+
+    loadLayout(wrap);
+    wireWindow(wrap, el, ph);
+  }
+
+  function makeFloatMirror(sourceEl){
+    // keep original in place; mirror into a new <video>
+    const wrap = document.createElement('div');
+    wrap.className = 'pf-float';
+    const bar = document.createElement('div');
+    bar.className = 'pf-bar';
+    bar.innerHTML = `<span>Floating mirror</span>
+      <span>
+        <button class="pf-btn pf-left"  title="Snap left">⇤</button>
+        <button class="pf-btn pf-right" title="Snap right">⇥</button>
+        <button class="pf-btn pf-close" title="Close">×</button>
+      </span>`;
+    const resize = document.createElement('div'); resize.className = 'pf-resize';
+    const mirror = document.createElement('video');
+    mirror.className = 'pf-fill';
+    mirror.muted = sourceEl.muted; // you’ll need a user gesture for audio
+    mirror.autoplay = true; mirror.playsInline = true; mirror.controls = false;
+
+    document.body.appendChild(wrap);
+    wrap.appendChild(bar);
+    wrap.appendChild(mirror);
+    wrap.appendChild(resize);
+
+    try {
+      const stream = sourceEl.captureStream ? sourceEl.captureStream() : null;
+      if (stream) mirror.srcObject = stream;
+      else mirror.src = sourceEl.currentSrc || sourceEl.src; // fallback (may be blocked by CORS)
+    } catch(e) {
+      console.warn('Mirror failed, falling back to move:', e);
+      wrap.remove();
+      return makeFloatMove(sourceEl);
+    }
+
+    loadLayout(wrap);
+    wireWindow(wrap, mirror, null);
+  }
+
+  function wireWindow(wrap, mediaEl, placeholder){
+    // drag
+    let drag=false,sx=0,sy=0,sl=0,st=0;
+    const bar = wrap.querySelector('.pf-bar');
+    bar.addEventListener('mousedown', e => {
+      drag = true; sx = e.clientX; sy = e.clientY;
+      const r = wrap.getBoundingClientRect(); sl = r.left; st = r.top;
+      wrap.style.left = sl + 'px'; wrap.style.top = st + 'px';
+      wrap.style.right = 'auto'; wrap.style.bottom = 'auto';
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', e => {
+      if (!drag) return;
+      wrap.style.left = (sl + (e.clientX - sx)) + 'px';
+      wrap.style.top  = (st + (e.clientY - sy)) + 'px';
+    });
+    window.addEventListener('mouseup', () => { if(drag) saveLayout(wrap); drag=false; });
+
+    // resize
+    let rez=false, sw=0, sh=0, ww=0, wh=0;
+    const resize = wrap.querySelector('.pf-resize');
+    resize.addEventListener('mousedown', e => {
+      rez=true; sw=e.clientX; sh=e.clientY;
+      const r=wrap.getBoundingClientRect(); ww=r.width; wh=r.height; e.preventDefault();
+    });
+    window.addEventListener('mousemove', e => {
+      if(!rez) return;
+      wrap.style.width  = Math.max(260, ww + (e.clientX - sw)) + 'px';
+      wrap.style.height = Math.max(146, wh + (e.clientY - sh)) + 'px';
+    });
+    window.addEventListener('mouseup', () => { if(rez) saveLayout(wrap); rez=false; });
+
+    // actions
+    bar.querySelector('.pf-left').onclick  = () => { wrap.style.left='16px'; wrap.style.right='auto'; wrap.style.top='72px'; saveLayout(wrap); };
+    bar.querySelector('.pf-right').onclick = () => { wrap.style.right='16px'; wrap.style.left='auto'; wrap.style.top='72px';  saveLayout(wrap); };
+    bar.querySelector('.pf-close').onclick = () => {
+      if (placeholder && mediaEl && placeholder.parentNode) {
+        placeholder.replaceWith(mediaEl);
+        mediaEl.classList.remove('pf-fill');
+      }
+      wrap.remove(); localStorage.removeItem(KEY);
+    };
+  }
+
+  // toolbar
+  const tb = document.createElement('div');
+  tb.className = 'pf-toolbar';
+  tb.innerHTML = `
+    <button id="pfReset">Reset layout</button>
+    <button id="pfPiP">Picture-in-Picture</button>
+  `;
+  document.body.appendChild(tb);
+  tb.querySelector('#pfReset').onclick = () => { localStorage.removeItem(KEY); location.reload(); };
+  tb.querySelector('#pfPiP').onclick = async () => {
+    try {
+      const v = [...document.querySelectorAll('video')].sort((a,b)=>b.clientWidth*b.clientHeight-a.clientWidth*a.clientHeight)[0];
+      if (!v) { alert('No <video> found'); return; }
+      if (document.pictureInPictureElement) await document.exitPictureInPicture();
+      else await v.requestPictureInPicture();
+    } catch (e) { alert(e.message || e); }
+  };
+
+  function init(){
+    const t = pickVideoish();
+    if (!t) return false;
+    if (USE_MIRROR && t.tagName.toLowerCase() === 'video') makeFloatMirror(t);
+    else makeFloatMove(t);
+    return true;
+  }
+
+  let tries = 0;
+  const iv = setInterval(() => { if (init() || ++tries > 12) clearInterval(iv); }, 800);
+})();
