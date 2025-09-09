@@ -1,0 +1,2 @@
+# pumpfunfix
+pip for pumpfun
